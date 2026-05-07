@@ -4,36 +4,96 @@ The camera is a 1kx1k LmAPD.
 
 Main features of the camera:
 - gain is propotional to bias voltage (BV)
-- Read noise is function of bias voltage (BV), is expressed as after amplification
+- Read noise is function of bias voltage (BV), is expressed as after amplification, 
+in e-/px/read
 - amplification of signal is deterministic unlike EMCCD, so no excess noise factor
 - Dark current: 0.1 e-/px/ksec
 - Quantum efficiency: 0.8 if BV <= 12
-- glow: 0.1 e-/px/s if BV <= 12. To be reduced in next detector prototype. It comes from reading electrons from the material itself
+- glow: 0.1 e-/px/read if BV <= 12. To be reduced in next detector prototype. It comes from reading electrons from the material itself
+
+Combiner performs pair-wise combination and 
+provide an ABCD sampling (4 outputs) of the fringes.
+
+Consequently, throughput should be divvided by 3 to account for each beam being split to be
+combined with the 3 other beams.
+
+Each output is sampled over 4 pixels (2 in spectral direction and 2 in the orthogonal one), 
+so a fringe is sampled over 16 pixels in total.
+
+Noise model comes from Colavita (PASP, 1999): https://www.jstor.org/stable/10.1086/316302?seq=4.
+
+The coherent energy scales as:
+E_coh = n_ph**2 * V**2, n_ph being the number of photons of a SINGLE beam, and V the fringe visibility.
+Demonstration:
+E_coh ~ (I1 * I2) * V**2 = (n_ph1 * n_ph2) * V**2 = n_ph**2 * V**2, with n_ph1 = n_ph2 = n_ph for a balanced beam combination.
+This expression slgihtly differs from Colavita because of their more accurate estimator for their own ABCD system.
+
+The variance of the noise model includes the ones of:
+- Photon noise: sigma_phot^2 = 2 * n_ph_tot * (n_ph * V)**2 + n_ph_tot**2, 
+n_ph_tot being the total number of photons illuminating the pixels 
+where the fringe pattern is projected (which explains why the SNR 
+of an all-in-one combiner decreases as the number of telescopes increases).
+- Dark current noise: sigma_dark^2 = dk_rate**2 * t_exp * n_pix
+- Read noise: sigma_ron^2 = (ron(BV)**2 + glow**2) * n_pix
+
+Axes of analysis:
+- Bias voltage (BV)
+- Target magnitude
+- Exposure time (t_exp)
+- Spectral band (Y, I, J and H)
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
+from itertools import product
 from scipy.optimize import curve_fit
+from tqdm import tqdm
 
 plt.ion()
 
-def photon_number(t_exp, mag, throughput, S_tel, N_tel, dl_j, QE, phi_0):
-    n_ph = throughput * S_tel * N_tel * dl_j * QE * t_exp * phi_0 * 10**(-0.4 * mag)
+def photon_number(t_exp, mag, throughput, S_tel, N_tel, dl, QE, phi_0):
+    """Calculate the number of photo-events of a SINGLE beam during an exposure.
+
+    Parameters
+    ----------
+    t_exp : float
+        Exposure time in seconds.
+    mag : float
+        Magnitude of the target star in the J band.
+    throughput : float
+        Total throughput of the system, including telescope, fiber coupling, spectrograph, etc.
+    S_tel : float
+        Collecting area of a single telescope in m².
+    N_tel : int
+        Total number of telescopes used by the combiner.
+    dl : float
+        Spectral bin width in um.
+    QE : float
+        Quantum efficiency of the detector.
+    phi_0 : float
+        Reference photon flux for a zero-magnitude star, in photons/m²/um/s.
+    Returns
+    -------
+    float
+        Number of photo-events of a SINGLE beam during the exposure.
+    """
+    
+    n_ph = throughput * S_tel * 1/(N_tel-1) * dl * QE * t_exp * phi_0 * 10**(-0.4 * mag)
     return n_ph
 
-def photon_noise(n_phot, V, n_teltot):
+def photon_noise(n_phot, V, n_tel):
     """
-    Return the variance of the photon noise.
+    Return the variance of the photon noise in a fringe sampled on an ABCD system.
 
 
     Parameters
     ----------
     n_phot : float
-        Total number of detected photons.
+        Number of photo-events of a SINGLE beam.
     V : float
         Fringe visibility (contrast), between 0 and 1.
-    n_teltot : int
-        Total number of telescopes contributing to the beam combination.
+    n_tel : int
+        Number of telescopes contributing to the illumination of the fringe pattern.
 
     Returns
     -------
@@ -43,21 +103,14 @@ def photon_noise(n_phot, V, n_teltot):
 
     Notes
     -----
-    The variance is computed as:
-
-    .. math::
-
-        \\sigma^2 = 2 N_{\\mathrm{phot}} \\left(\\frac{N_{\\mathrm{phot}} V}{N_{\\mathrm{tel}}}\\right)^2 + N_{\\mathrm{phot}}
-
-    where the first term represents speckle (intensity) noise scaled by the
-    squared fringe contrast per baseline, and the second term is the standard
-    Poisson contribution.
+    See main notes above for the derivation of this formula, inspired by Colavita (PASP, 1999).
     """
-    return 2 * n_phot * (n_phot * V / n_teltot)**2 + n_phot
+    n_ph_tot = n_tel * n_phot
+    return 2 * n_ph_tot * (n_phot * V)**2 + n_ph_tot**2
 
 def dark_current(dk_rate, t_exp, n_pix):
     """
-    Return the total dark current accumulated over an exposure.
+    Return the variance of the dark current accumulated over an exposure.
 
     Parameters
     ----------
@@ -72,12 +125,12 @@ def dark_current(dk_rate, t_exp, n_pix):
     Returns
     -------
     float
-        Total dark current [e-] accumulated across all pixels during the
-        exposure, computed as ``dk_rate * t_exp * n_pix``.
+        Variance of the dark current [e-²] accumulated across all pixels during the
+        exposure, computed as ``dk_rate**2 * t_exp * n_pix``.
     """
-    return dk_rate * t_exp * n_pix
+    return dk_rate**2 * t_exp * n_pix
 
-def ron(BV, npix, glow):
+def ron(BV, npix, glow, cds_mode):
     """
     Return the read noise as a function of bias voltage.
 
@@ -91,11 +144,15 @@ def ron(BV, npix, glow):
         ``numpy.interp``.
     npix : int
         Number of pixels over which the read noise is summed.
+    glow : float
+        Glow level [e-/px/frame] for the read noise calculation.
+    cds_mode : bool, optional
+        If True, the read noise is calculated for correlated double sampling (CDS) mode, which doubles the read noise variance.
 
     Returns
     -------
     float or ndarray
-        Total read noise [e-/frame] accumulated across all pixels at the
+        Variance of the read noise [e-²] accumulated across all pixels at the
         requested bias voltage(s).
 
     """
@@ -104,19 +161,86 @@ def ron(BV, npix, glow):
 
     rn = np.interp(BV, BV0, ron_values)
 
-    return (rn + glow) * npix
+    if cds_mode:
+        rn = rn * 2**0.5 # CDS mode doubles the read noise variance
+        
+    return (rn**2 + glow**2) * npix
 
-def total_noise(n_ph, visi, n_teltot, dk_rate, t_exp, n_pix, BV, glow):
-    phot_noise = photon_noise(n_ph, visi, n_teltot)
+def total_noise(n_ph, visi, n_tel, dk_rate, t_exp, n_pix, BV, glow, cds_mode=False):
+    """Calculate the total noise variance for a fringe measurement.
+    
+    Parameters
+    ----------
+    n_ph : float
+        Number of photo-events of a SINGLE beam.
+    visi : float
+        Fringe visibility (contrast), between 0 and 1.
+    n_tel : int
+        Number of telescopes contributing to the illumination of the fringe pattern.
+    dk_rate : float
+        Dark current rate [e-/px/s].
+    t_exp : float
+        Exposure time [s].
+    n_pix : int
+        Number of pixels over which the noise is summed.
+    BV : float
+        Bias voltage [V] for the read noise calculation.
+    glow : float
+        Glow level [e-/px/frame] for the read noise calculation.
+    cds_mode : bool, optional
+        If True, the read noise is calculated for correlated double sampling (CDS) mode, which doubles the read noise variance.
+
+    Returns
+    -------
+    float
+        Total noise standard deviation [e-] for the fringe measurement.
+    """
+    phot_noise = photon_noise(n_ph, visi, n_tel)
     dk_noise = dark_current(dk_rate, t_exp, n_pix)
-    read_noise = ron(BV, n_pix, glow)
+    read_noise = ron(BV, n_pix, glow, cds_mode=cds_mode)
 
     return (phot_noise + dk_noise + read_noise)**0.5
 
-def coherent_energy(n_phot, visi, n_teltot):
-    return (n_phot * visi / n_teltot)**2
+def coherent_energy(n_phot, visi):
+    """Calculate the coherent energy of a fringe measurement.
+
+    Parameters
+    ----------
+    n_phot : float
+        Number of photo-events of a SINGLE beam.
+    visi : float
+        Fringe visibility (contrast), between 0 and 1.
+
+    Returns
+    -------
+    float
+        Coherent energy of the fringe measurement, computed as ``(n_phot * visi)**2``.
+
+    Notes
+    -----
+    This formula is derived from the fact that the coherent energy scales as 
+    ``E_coh ~ (I1 * I2) * V**2``. 
+    For a balanced beam combination where both beams have the same intensity (i.e. ``I1 = I2 = n_phot``), 
+    this simplifies to ``E_coh ~ n_phot**2 * V**2``.
+    """
+    return (n_phot * visi)**2
 
 def calculate_snr(nrj, noise):
+    """
+    Calculate the signal-to-noise ratio (SNR) of a fringe measurement.
+
+    Parameters
+    ------------
+    nrj : float
+        Signal power.
+    noise : float
+        Noise standard deviation.
+
+    Returns
+    -------
+    float
+        Signal-to-noise ratio (SNR).
+    """
     return nrj / noise
 
 #-----------------------------------
@@ -154,6 +278,7 @@ def calculate_snr(nrj, noise):
 # SNR
 #----------------------------------
 use_ut = True
+cds_mode = False
 
 # Observatory and instrument parameters
 if use_ut:
@@ -175,31 +300,235 @@ Sr = 0.5 # Strehl ratio
 t_echelle = 0.25 # Throughput of the échelle spectrograph
 t_sharps = 0.34/4 # Average throughput of GRAVITY in HR mode, as a proxy for SHARPS
 throughput = t_vlti * rho_0 * t_echelle * t_sharps * Sr # Total throughput
-n_pix = 9 # Number of pixels per spectral bin (assuming a 3x3 sampling of the PSF)
+n_pix = 16 # Number of pixels to sample a fringe in a spectral chanel: spot of 2x2 pixels and 4 outputs
 
 # Detector parameters
 QE = 0.8 # Quantum efficiency of the detector
 dk_rate = 1e-4 # Dark current rate in e-/px/s
-t_exp = 0.005 # Exposure time in seconds
+t_exp = 1. # Exposure time in seconds
 glow = 0.1 # Glow in e-/px/frame, to be reduced in next detector prototype
 
 # Photometric parameters
-phi_0 = 6.2e10 # Reference photon flux for a zero-magnitude star in J band, in photons/m²/um
+# Reference photon flux for a zero-magnitude star in photons/m²/um/s
+wl_labels = ['Y', 'I', 'J', 'H']
+phi = [3.04e10, 4.86e10, 1.94e10, 9.32e10] # Reference photon flux for a zero-magnitude star in photons/m²/um/s for Y, I, J and H bands, respectively
 
-wl_j = 1.25 # Central wavelength of J band in um
-wl_i = 1.0 # Central wavelength of I band in um
+wls = [0.8, 1, 1.22, 1.55]
+wls = np.array(wls)
+
 R = 25000 # Spectral resolution of the spectrograph
-dl_i = wl_i / R # Spectral bin width in um
-dl_j = wl_j / R # Spectral bin width in um
 
-mag = 0.
-visi = 1. # Fringe visibility
-BV = 3 # Bias voltage in Volt
+dls = wls / R # Spectral bin width in um
+mag_range = np.linspace(0, 20, 11) # Range of target magnitudes to explore
+visi_range = np.linspace(0., 1.0, 5) # Range of fringe visibilities to explore
+voltage_range = np.arange(3, 13) # Range of bias voltages to explore
 
-n_ph = photon_number(t_exp, mag=mag, throughput=throughput, S_tel=S_tel, N_tel=2, dl_j=dl_j, QE=QE, phi_0=phi_0)
+snr_results = np.zeros((len(dls), len(visi_range), len(mag_range), len(voltage_range))) # wl, V, mag, BV
 
-nrj = coherent_energy(n_ph, visi, 2)
-noises = total_noise(n_ph, visi, 2, dk_rate, t_exp, n_pix, BV, glow)
+for m, dl in enumerate(dls):
+    for i, visi in enumerate(visi_range):
+        for j, mag in enumerate(mag_range):
+            for k, BV in enumerate(voltage_range):
+                n_ph = photon_number(t_exp, mag=mag, throughput=throughput, S_tel=S_tel, N_tel=N_tel, dl=dl, QE=QE, phi_0=phi[m])
 
-snr = calculate_snr(nrj, noises)
+                nrj = coherent_energy(n_ph, visi)
+                noises = total_noise(n_ph, visi, 2, dk_rate, t_exp, n_pix, BV, glow)
+                snr = calculate_snr(nrj, noises)
+                snr_results[m, i, j, k] = snr
 
+#------------------------------
+# Plotting SNR
+#------------------------------
+
+def plot_all_1d_cuts(data_cube, axis_values, represented_axes, frozen_values=None,
+                     axis_names=None, quantity_label='SNR', ax=None):
+    """Plot all possible 1D cuts for selected axes of an N-D data cube.
+
+    Parameters
+    ----------
+    data_cube : ndarray
+        N-D array containing the data to plot.
+    axis_values : list of array_like
+        Coordinate values for each axis of ``data_cube``.
+        ``axis_values[i]`` contains the physical values along axis ``i``.
+    represented_axes : list or tuple
+        Axes to represent on the plot. The first axis is used as x-axis.
+        Any additional axes are fully expanded as one line per value
+        combination (all 1D cuts are shown).
+    frozen_values : dict, optional
+        Frozen values for non-represented axes.
+        Keys are axis indices (int) or axis names (if ``axis_names`` is given).
+        Values are physical axis values; nearest grid point is used.
+    axis_names : list of str, optional
+        Labels for each axis of ``data_cube``.
+    quantity_label : str, optional
+        Label of plotted quantity on the y-axis.
+    ax : matplotlib.axes.Axes, optional
+        Existing axes where the plot is drawn.
+
+    Returns
+    -------
+    fig, ax : tuple
+        Matplotlib figure and axes containing the plot.
+
+    Notes
+    -----
+    For every axis not in ``represented_axes``, a value must be provided in
+    ``frozen_values`` so the corresponding slice can be extracted.
+    """
+    data_cube = np.asarray(data_cube)
+    ndim = data_cube.ndim
+
+    if len(axis_values) != ndim:
+        raise ValueError("axis_values must contain one coordinate array per data cube axis.")
+
+    if axis_names is None:
+        axis_names = [f"axis_{i}" for i in range(ndim)]
+    if len(axis_names) != ndim:
+        raise ValueError("axis_names must have the same length as data_cube.ndim.")
+
+    name_to_index = {name: i for i, name in enumerate(axis_names)}
+
+    def _to_axis_index(axis_id):
+        if isinstance(axis_id, str):
+            if axis_id not in name_to_index:
+                raise ValueError(f"Unknown axis name: {axis_id}")
+            return name_to_index[axis_id]
+        return int(axis_id)
+
+    rep_axes = [_to_axis_index(axis_id) for axis_id in represented_axes]
+    if len(rep_axes) == 0:
+        raise ValueError("represented_axes must contain at least one axis.")
+    if len(set(rep_axes)) != len(rep_axes):
+        raise ValueError("represented_axes contains duplicated axes.")
+    if any(ax_id < 0 or ax_id >= ndim for ax_id in rep_axes):
+        raise ValueError("represented_axes contains an out-of-range axis index.")
+
+    frozen_values = {} if frozen_values is None else dict(frozen_values)
+
+    # Normalize frozen-values keys to axis indices.
+    frozen_by_axis = {}
+    for key, value in frozen_values.items():
+        axis_id = _to_axis_index(key)
+        frozen_by_axis[axis_id] = value
+
+    non_rep_axes = [i for i in range(ndim) if i not in rep_axes]
+    missing_frozen_axes = [i for i in non_rep_axes if i not in frozen_by_axis]
+    if missing_frozen_axes:
+        missing_names = ", ".join(axis_names[i] for i in missing_frozen_axes)
+        raise ValueError(f"Missing frozen value(s) for axis/axes: {missing_names}")
+
+    def _format_axis_value(axis_id, value, idx=None):
+        """Return a readable value label, with special handling for spectral band labels."""
+        axis_name = axis_names[axis_id].strip().lower()
+
+        if axis_name in ("wl band", "wl_band", "band"):
+            wl_global = globals().get('wl_labels', None)
+            if idx is not None and wl_global is not None and len(wl_global) == data_cube.shape[axis_id]:
+                return str(wl_global[idx])
+
+        if isinstance(value, (str, np.str_)):
+            return str(value)
+
+        try:
+            return f"{float(value):g}"
+        except (TypeError, ValueError):
+            return str(value)
+
+    def _find_axis_index(arr, value):
+        """Return axis index from value: nearest for numeric axes, exact match for text axes."""
+        arr = np.asarray(arr)
+
+        if np.issubdtype(arr.dtype, np.number):
+            return int(np.argmin(np.abs(arr - value)))
+
+        exact = np.where(arr == value)[0]
+        if exact.size:
+            return int(exact[0])
+
+        # Tolerate case-only mismatch for string-like axes.
+        arr_str = np.char.lower(arr.astype(str))
+        value_str = str(value).lower()
+        exact_ci = np.where(arr_str == value_str)[0]
+        if exact_ci.size:
+            return int(exact_ci[0])
+
+        raise ValueError(f"Value {value} not found in non-numeric axis values: {arr.tolist()}")
+
+    # Select nearest indices for frozen axes.
+    frozen_idx = {}
+    frozen_selected_values = {}
+    for axis_id in non_rep_axes:
+        arr = np.asarray(axis_values[axis_id])
+        val = frozen_by_axis[axis_id]
+        idx = _find_axis_index(arr, val)
+        frozen_idx[axis_id] = idx
+        frozen_selected_values[axis_id] = arr[idx]
+
+    if ax is None:
+        fig, ax = plt.subplots(figsize=(8, 5))
+    else:
+        fig = ax.figure
+
+    x_axis = rep_axes[0]
+    x = np.asarray(axis_values[x_axis])
+    varying_axes = rep_axes[1:]
+
+    if len(varying_axes) == 0:
+        idxer = [slice(None)] * ndim
+        for axis_id, idx in frozen_idx.items():
+            idxer[axis_id] = idx
+        y = data_cube[tuple(idxer)]
+        ax.plot(x, y, marker='o')
+    else:
+        varying_values = [np.asarray(axis_values[axis_id]) for axis_id in varying_axes]
+        for varying_combination in product(*varying_values):
+            idxer = [slice(None)] * ndim
+            label_parts = []
+
+            for axis_id, idx in frozen_idx.items():
+                idxer[axis_id] = idx
+
+            for axis_id, v in zip(varying_axes, varying_combination):
+                arr = np.asarray(axis_values[axis_id])
+                idx = _find_axis_index(arr, v)
+                idxer[axis_id] = idx
+                label_value = _format_axis_value(axis_id, arr[idx], idx=idx)
+                label_parts.append(f"{axis_names[axis_id]}={label_value}")
+
+            y = data_cube[tuple(idxer)]
+            ax.plot(x, y, marker='o', label=", ".join(label_parts))
+
+        ax.legend(title="Slice 1D", fontsize=9)
+
+    ax.set_xlabel(axis_names[x_axis])
+    ax.set_ylabel(quantity_label)
+    ax.set_yscale('log')
+    ax.axhline(3, color='k', linestyle='--', linewidth=1.2, label='Threshold SNR=3')
+    ax.grid(True, alpha=0.3)
+
+    frozen_title = ", ".join(
+        f"{axis_names[axis_id]}={_format_axis_value(axis_id, value, idx=frozen_idx[axis_id])}"
+        for axis_id, value in frozen_selected_values.items()
+    )
+    if frozen_title:
+        ax.set_title(f"{quantity_label} vs {axis_names[x_axis]} (for {frozen_title})")
+    else:
+        ax.set_title(f"{quantity_label} vs {axis_names[x_axis]}")
+
+    handles, labels = ax.get_legend_handles_labels()
+    if labels:
+        ax.legend(title="1D slice", fontsize=9)
+
+    fig.tight_layout()
+    return fig, ax
+
+
+plot_all_1d_cuts(
+    data_cube=snr_results,
+    axis_values=[wl_labels, visi_range, mag_range, voltage_range],
+    represented_axes=['Magnitude', 'wl band'],  # x-axis then all line cuts
+    frozen_values={'visibility': 0.5, 'Bias voltage': 12.0},
+    axis_names=['wl band', 'visibility', 'Magnitude', 'Bias voltage'],
+    quantity_label='SNR'
+)
