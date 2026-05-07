@@ -41,6 +41,13 @@ Axes of analysis:
 - Target magnitude
 - Exposure time (t_exp)
 - Spectral band (Y, I, J and H)
+
+Photometric zero points:
+- Y: 5.71e-9 W/m2/um, 2026 Jy, wl=1.0305 um, https://ui.adsabs.harvard.edu/scan/manifest/2006MNRAS.367..454H
+- I: 2550 Jy,wl=0.79e-6, https://www.astrouw.edu.pl/~simkoz/mags.html
+- J: 3.129e-13 W/cm2/um, 1594 Jy, wl=1.235 um, https://ui.adsabs.harvard.edu/abs/2003AJ....126.1090C/abstract
+- H: 1.133e-13 W/cm2/um, 1024 Jy, wl=1.662 um, https://ui.adsabs.harvard.edu/abs/2003AJ....126.1090C/abstract
+
 """
 
 import numpy as np
@@ -311,9 +318,9 @@ glow = 0.1 # Glow in e-/px/frame, to be reduced in next detector prototype
 # Photometric parameters
 # Reference photon flux for a zero-magnitude star in photons/m²/um/s
 wl_labels = ['Y', 'I', 'J', 'H']
-phi = [3.04e10, 4.86e10, 1.94e10, 9.32e10] # Reference photon flux for a zero-magnitude star in photons/m²/um/s for Y, I, J and H bands, respectively
+phi = [2.96215222e+10, 4.87143666e+10, 1.94534122e+10, 9.47947307e+09] # Reference photon flux for a zero-magnitude star in photons/m²/um/s for Y, I, J and H bands, respectively
 
-wls = [0.8, 1, 1.22, 1.55]
+wls = [0.79, 1.0305, 1.235, 1.662] # in um
 wls = np.array(wls)
 
 R = 25000 # Spectral resolution of the spectrograph
@@ -466,7 +473,9 @@ def plot_all_1d_cuts(data_cube, axis_values, represented_axes, frozen_values=Non
         frozen_selected_values[axis_id] = arr[idx]
 
     if ax is None:
-        fig, ax = plt.subplots(figsize=(8, 5))
+        golden_ratio = (1 + 5**0.5) / 2
+        fig_width = 10
+        fig, ax = plt.subplots(figsize=(fig_width, fig_width / golden_ratio))
     else:
         fig = ax.figure
 
@@ -479,7 +488,7 @@ def plot_all_1d_cuts(data_cube, axis_values, represented_axes, frozen_values=Non
         for axis_id, idx in frozen_idx.items():
             idxer[axis_id] = idx
         y = data_cube[tuple(idxer)]
-        ax.plot(x, y, marker='o')
+        ax.plot(x, y, marker='o', markersize=8, linestyle='-', linewidth=2.5)
     else:
         varying_values = [np.asarray(axis_values[axis_id]) for axis_id in varying_axes]
         for varying_combination in product(*varying_values):
@@ -497,13 +506,15 @@ def plot_all_1d_cuts(data_cube, axis_values, represented_axes, frozen_values=Non
                 label_parts.append(f"{axis_names[axis_id]}={label_value}")
 
             y = data_cube[tuple(idxer)]
-            ax.plot(x, y, marker='o', label=", ".join(label_parts))
+            ax.plot(x, y, marker='o', markersize=8, linestyle='-', linewidth=2.5, label=", ".join(label_parts))
 
-        ax.legend(title="Slice 1D", fontsize=9)
+        ax.legend(title="Slice 1D", fontsize=13, title_fontsize=14)
 
-    ax.set_xlabel(axis_names[x_axis])
-    ax.set_ylabel(quantity_label)
+    ax.set_xlabel(axis_names[x_axis], fontsize=16)
+    ax.set_ylabel(quantity_label, fontsize=16)
+    ax.tick_params(axis='both', labelsize=14)
     ax.set_yscale('log')
+    ax.set_ylim(1e-9, 1e3)
     ax.axhline(3, color='k', linestyle='--', linewidth=1.2, label='Threshold SNR=3')
     ax.grid(True, alpha=0.3)
 
@@ -512,23 +523,35 @@ def plot_all_1d_cuts(data_cube, axis_values, represented_axes, frozen_values=Non
         for axis_id, value in frozen_selected_values.items()
     )
     if frozen_title:
-        ax.set_title(f"{quantity_label} vs {axis_names[x_axis]} (for {frozen_title})")
+        ax.set_title(f"{quantity_label} vs {axis_names[x_axis]} (for {frozen_title})\n R={R}", fontsize=16)
     else:
-        ax.set_title(f"{quantity_label} vs {axis_names[x_axis]}")
+        ax.set_title(f"{quantity_label} vs {axis_names[x_axis]}", fontsize=16)
 
     handles, labels = ax.get_legend_handles_labels()
     if labels:
-        ax.legend(title="1D slice", fontsize=9)
+        ax.legend(title="1D slice", fontsize=13, title_fontsize=14)
 
     fig.tight_layout()
     return fig, ax
 
-
-plot_all_1d_cuts(
+froz_values = {'visibility': 1, 'Bias voltage (V)': 12.0}
+fig, ax = plot_all_1d_cuts(
     data_cube=snr_results,
     axis_values=[wl_labels, visi_range, mag_range, voltage_range],
-    represented_axes=['Magnitude', 'wl band'],  # x-axis then all line cuts
-    frozen_values={'visibility': 0.5, 'Bias voltage': 12.0},
-    axis_names=['wl band', 'visibility', 'Magnitude', 'Bias voltage'],
-    quantity_label='SNR'
+    represented_axes=['Magnitude', 'Band'],  # x-axis then all line cuts
+    frozen_values=froz_values,
+    axis_names=['Band', 'visibility', 'Magnitude', 'Bias voltage (V)'],
+    quantity_label=r'SNR ($V^2$)'
 )
+fig.savefig(f'snr_vs_mag_visibility{froz_values["visibility"]}_BV{froz_values["Bias voltage (V)"]:04.1f}_R{R}_CDS{cds_mode}_{tel_type}.png', dpi=150)
+
+froz_values = {'visibility': 0.5, 'Bias voltage (V)': 12.0}
+fig, ax = plot_all_1d_cuts(
+    data_cube=snr_results,
+    axis_values=[wl_labels, visi_range, mag_range, voltage_range],
+    represented_axes=['Magnitude', 'Band'],  # x-axis then all line cuts
+    frozen_values=froz_values,
+    axis_names=['Band', 'visibility', 'Magnitude', 'Bias voltage (V)'],
+    quantity_label=r'SNR ($V^2$)'
+)
+fig.savefig(f'snr_vs_mag_visibility{froz_values["visibility"]}_BV{froz_values["Bias voltage (V)"]:04.1f}_R{R}_CDS{cds_mode}_{tel_type}.png', dpi=150)
