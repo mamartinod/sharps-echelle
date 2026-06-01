@@ -47,13 +47,14 @@ Photometric zero points:
 - I: 2550 Jy,wl=0.79e-6, https://www.astrouw.edu.pl/~simkoz/mags.html
 - J: 3.129e-13 W/cm2/um, 1594 Jy, wl=1.235 um, https://ui.adsabs.harvard.edu/abs/2003AJ....126.1090C/abstract
 - H: 1.133e-13 W/cm2/um, 1024 Jy, wl=1.662 um, https://ui.adsabs.harvard.edu/abs/2003AJ....126.1090C/abstract
-
+- K: 4.66e9 ph/s/m2/um, 666.7 Jy, wl=2.159 um, https://ui.adsabs.harvard.edu/abs/2003AJ....126.1090C/abstract
 """
 
 import numpy as np
 import matplotlib.pyplot as plt
 from itertools import product
 from scipy.optimize import curve_fit
+from scipy.interpolate import interp1d
 
 plt.ion()
 
@@ -478,13 +479,17 @@ cds_mode = False
 
 # Observatory and instrument parameters
 if use_ut:
-    t_vlti = 0.32 # np.mean([0.17, 0.18, 0.14, 0.18]) # VLTI UT transmission in J band, https://arxiv.org/pdf/1608.06752.pdf, Tab. 1
+    t_vlti = [np.mean([0.11, 0.13, 0.12, 0.14]), 
+              np.mean([0.17, 0.23, 0.21, 0.10]), 
+              np.mean([0.26, 0.29, 0.25, 0.15])] # VLTI UT transmission in J, H and K bands, https://arxiv.org/pdf/1608.06752.pdf, Tab. 1
     m1_diam = 8.2 # Diameter of the primary mirror in m
     S_tel = np.pi * (m1_diam/2)**2 # Collecting area of a VLTI UT in m²
     tel_type = 'UT'
     m2_diam = 1.116 # Diameter of the secondary mirror in m
 else:
-    t_vlti = 0.22 # np.mean([0.11, 0.13, 0.12]) # VLTI AT transmission in J band, https://arxiv.org/pdf/1608.06752.pdf, Tab. 1
+    t_vlti = [np.mean([0.17, 0.18, 0.14, 0.18]), 
+              np.mean([0.33, 0.37, 0.28, 0.33]), 
+              np.mean([0.36, 0.39, 0.32, 0.33])] # VLTI AT transmission in J, H and K bands, https://arxiv.org/pdf/1608.06752.pdf, Tab. 1
     S_tel = np.pi * (1.8/2)**2 # Collecting area of a VLTI AT in m²
     tel_type = 'AT'
 
@@ -495,7 +500,6 @@ rho0 = rho_0 * rho_1 # Coupling efficiency for the UT, taking into account centr
 Sr = 0.5 # Strehl ratio
 t_echelle = 0.25 # Throughput of the échelle spectrograph
 t_sharps = 0.34/4 # Average throughput of GRAVITY in HR mode, as a proxy for SHARPS
-throughput = t_vlti * rho_0 * t_echelle * t_sharps * Sr # Total throughput
 n_pix = 16 # Number of pixels to sample a fringe in a spectral chanel: spot of 2x2 pixels and 4 outputs
 
 # Detector parameters
@@ -510,13 +514,13 @@ for t_exp in [1. ,10., 100.]:
 
     # Photometric parameters
     # Reference photon flux for a zero-magnitude star in photons/m²/um/s
-    wl_labels = ['Y', 'I', 'J', 'H']
-    phi = [2.96215222e+10, 4.87143666e+10, 1.94534122e+10, 9.47947307e+09] # Reference photon flux for a zero-magnitude star in photons/m²/um/s for Y, I, J and H bands, respectively
+    wl_labels = ['Y', 'I', 'J', 'H', 'K']
+    phi = [2.96215222e+10, 4.87143666e+10, 1.94534122e+10, 9.47947307e+09, 4.66e9] # Reference photon flux for a zero-magnitude star in photons/m²/um/s for Y, I, J, H and K bands, respectively
 
-    wls = [0.79, 1.0305, 1.235, 1.662] # in um
+    wls = [0.79, 1.0305, 1.235, 1.662, 2.159] # in um
     wls = np.array(wls)
 
-    R = 25000 # Spectral resolution of the spectrograph
+    # R = 25000 # Spectral resolution of the spectrograph
 
     for R in [22, 500, 4500, 25000]:
 
@@ -531,6 +535,9 @@ for t_exp in [1. ,10., 100.]:
             for i, visi in enumerate(visi_range):
                 for j, mag in enumerate(mag_range):
                     for k, BV in enumerate(voltage_range):
+                        t_vlti_interp = interp1d(wls[2:], t_vlti, kind='linear', fill_value='extrapolate')
+                        throughput = t_vlti_interp(wls[m]) * rho_0 * t_echelle * t_sharps * Sr # Total throughput
+
                         n_ph = photon_number(t_exp, mag=mag, throughput=throughput, S_tel=S_tel, N_tel=N_tel, dl=dl, QE=QE, phi_0=phi[m])
 
                         nrj = coherent_energy(n_ph, visi)
@@ -552,7 +559,6 @@ for t_exp in [1. ,10., 100.]:
             quantity_label=r'SNR ($V^2$)'
         )
         fig.savefig(f'snr_vs_mag_visibility{froz_values["visibility"]}_BV{froz_values["Bias voltage (V)"]:04.1f}_R{R}_CDS{cds_mode}_{tel_type}_texp{t_exp}_tin{t_int/60:.1f}.png', dpi=150)
-
         plt.close('all')
         # froz_values = {'visibility': 0.5, 'Bias voltage (V)': 12.0}
         # fig, ax = plot_all_1d_cuts(
