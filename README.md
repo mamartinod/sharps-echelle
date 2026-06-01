@@ -23,7 +23,7 @@ Default setup includes:
 - 4 telescopes
 - UT transmission mode (`use_ut = True`)
 - detector and throughput assumptions documented in the script header
-- Y, I, J, H bands
+- Y, I, J, H, K bands
 
 ## Requirements
 
