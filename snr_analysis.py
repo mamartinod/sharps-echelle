@@ -55,203 +55,9 @@ import matplotlib.pyplot as plt
 from itertools import product
 from scipy.optimize import curve_fit
 from scipy.interpolate import interp1d
+from snr_analysis_lib import *
 
 plt.ion()
-
-def photon_number(t_exp, mag, throughput, S_tel, N_tel, dl, QE, phi_0):
-    """Calculate the number of photo-events of a SINGLE beam during an exposure.
-
-    Parameters
-    ----------
-    t_exp : float
-        Exposure time in seconds.
-    mag : float
-        Magnitude of the target star in the J band.
-    throughput : float
-        Total throughput of the system, including telescope, fiber coupling, spectrograph, etc.
-    S_tel : float
-        Collecting area of a single telescope in m².
-    N_tel : int
-        Total number of telescopes used by the combiner.
-    dl : float
-        Spectral bin width in um.
-    QE : float
-        Quantum efficiency of the detector.
-    phi_0 : float
-        Reference photon flux for a zero-magnitude star, in photons/m²/um/s.
-    Returns
-    -------
-    float
-        Number of photo-events of a SINGLE beam during the exposure.
-    """
-    
-    n_ph = throughput * S_tel * 1/(N_tel-1) * dl * QE * t_exp * phi_0 * 10**(-0.4 * mag)
-    return n_ph
-
-def photon_noise(n_phot, V, n_tel):
-    """
-    Return the variance of the photon noise in a fringe sampled on an ABCD system.
-
-
-    Parameters
-    ----------
-    n_phot : float
-        Number of photo-events of a SINGLE beam.
-    V : float
-        Fringe visibility (contrast), between 0 and 1.
-    n_tel : int
-        Number of telescopes contributing to the illumination of the fringe pattern.
-
-    Returns
-    -------
-    float
-        Variance of the photon noise [e-²], including both the Poisson
-        shot noise term and the speckle noise contribution.
-
-    Notes
-    -----
-    See main notes above for the derivation of this formula, inspired by Colavita (PASP, 1999).
-    """
-    n_ph_tot = n_tel * n_phot
-    return 2 * n_ph_tot * (n_phot * V)**2 + n_ph_tot**2
-
-def dark_current(dk_rate, t_exp, n_pix):
-    """
-    Return the variance of the dark current accumulated over an exposure.
-
-    Parameters
-    ----------
-    dk_rate : float
-        Dark current rate [e-/px/s]. For this detector, the nominal value
-        is 0.1 e-/px/ksec (i.e. 1e-4 e-/px/s).
-    t_exp : float
-        Exposure time [s].
-    n_pix : int
-        Number of pixels over which the dark current is summed.
-
-    Returns
-    -------
-    float
-        Variance of the dark current [e-²] accumulated across all pixels during the
-        exposure, computed as ``dk_rate**2 * t_exp * n_pix``.
-    """
-    return dk_rate**2 * t_exp * n_pix
-
-def ron(BV, npix, glow, cds_mode):
-    """
-    Return the read noise as a function of bias voltage.
-
-    Interpolates linearly from a table of measured read noise values.
-
-    Parameters
-    ----------
-    BV : float or array_like
-        Bias voltage [V]. Should be within the measured range [3, 14] V;
-        values outside this range are clipped to the boundary values by
-        ``numpy.interp``.
-    npix : int
-        Number of pixels over which the read noise is summed.
-    glow : float
-        Glow level [e-/px/frame] for the read noise calculation.
-    cds_mode : bool, optional
-        If True, the read noise is calculated for correlated double sampling (CDS) mode, which doubles the read noise variance.
-
-    Returns
-    -------
-    float or ndarray
-        Variance of the read noise [e-²] accumulated across all pixels at the
-        requested bias voltage(s).
-
-    """
-    BV0 = np.arange(3, 15) # Bias voltage range to explore in Volt
-    ron_values = np.array([13.3, 11.3, 9, 7, 5.5, 4, 3, 2, 1.5, 1, 0.8, 0.4])
-
-    rn = np.interp(BV, BV0, ron_values)
-
-    if cds_mode:
-        rn = rn * 2**0.5 # CDS mode doubles the read noise variance
-        
-    return (rn**2 + glow**2) * npix
-
-def total_noise(n_ph, visi, n_tel, dk_rate, t_exp, n_pix, BV, glow, nb_frames, cds_mode=False):
-    """Calculate the total noise variance for a fringe measurement.
-    
-    Parameters
-    ----------
-    n_ph : float
-        Number of photo-events of a SINGLE beam.
-    visi : float
-        Fringe visibility (contrast), between 0 and 1.
-    n_tel : int
-        Number of telescopes contributing to the illumination of the fringe pattern.
-    dk_rate : float
-        Dark current rate [e-/px/s].
-    t_exp : float
-        Exposure time [s].
-    n_pix : int
-        Number of pixels over which the noise is summed.
-    BV : float
-        Bias voltage [V] for the read noise calculation.
-    glow : float
-        Glow level [e-/px/frame] for the read noise calculation.
-    nb_frames : int
-        Number of frames in the integration time
-    cds_mode : bool, optional
-        If True, the read noise is calculated for correlated double sampling (CDS) mode, which doubles the read noise variance.
-
-    Returns
-    -------
-    float
-        Total noise standard deviation [e-] for the fringe measurement.
-    """
-    phot_noise = photon_noise(n_ph, visi, n_tel)
-    dk_noise = dark_current(dk_rate, t_exp, n_pix)
-    read_noise = ron(BV, n_pix, glow, cds_mode=cds_mode)
-
-    return (phot_noise + dk_noise + read_noise)**0.5 / nb_frames**0.5
-
-def coherent_energy(n_phot, visi):
-    """Calculate the coherent energy of a fringe measurement.
-
-    Parameters
-    ----------
-    n_phot : float
-        Number of photo-events of a SINGLE beam.
-    visi : float
-        Fringe visibility (contrast), between 0 and 1.
-
-    Returns
-    -------
-    float
-        Coherent energy of the fringe measurement, computed as ``(n_phot * visi)**2``.
-
-    Notes
-    -----
-    This formula is derived from the fact that the coherent energy scales as 
-    ``E_coh ~ (I1 * I2) * V**2``. 
-    For a balanced beam combination where both beams have the same intensity (i.e. ``I1 = I2 = n_phot``), 
-    this simplifies to ``E_coh ~ n_phot**2 * V**2``.
-    """
-    return (n_phot * visi)**2
-
-def calculate_snr(nrj, noise):
-    """
-    Calculate the signal-to-noise ratio (SNR) of a fringe measurement.
-
-    Parameters
-    ------------
-    nrj : float
-        Signal power.
-    noise : float
-        Noise standard deviation.
-
-    Returns
-    -------
-    float
-        Signal-to-noise ratio (SNR).
-    """
-    return nrj / noise
-
 
 def plot_all_1d_cuts(data_cube, axis_values, represented_axes, frozen_values=None,
                      axis_names=None, quantity_label='SNR', ax=None):
@@ -429,7 +235,7 @@ def plot_all_1d_cuts(data_cube, axis_values, represented_axes, frozen_values=Non
         for axis_id, value in frozen_selected_values.items()
     )
     if frozen_title:
-        ax.set_title(f"{quantity_label} vs {axis_names[x_axis]} \nwith {frozen_title}\nand R={R}, exp time={t_exp} s, int time={t_int/60:.1f} min", fontsize=16)
+        ax.set_title(f"{quantity_label} vs {axis_names[x_axis]} \nwith {frozen_title}\nand R={R}, DIT={t_dit} s, exp time={t_exp/60:.1f} min", fontsize=16)
     else:
         ax.set_title(f"{quantity_label} vs {axis_names[x_axis]}", fontsize=16)
 
@@ -439,37 +245,6 @@ def plot_all_1d_cuts(data_cube, axis_values, represented_axes, frozen_values=Non
 
     fig.tight_layout()
     return fig, ax
-
-#-----------------------------------
-# RON vs BV profile characterisation
-#-----------------------------------
-# BV = np.arange(3, 15) # Bias voltage range to explore in Volt
-# ron_values = np.array([13.3, 11.3, 9, 7, 5.5, 4, 3, 2, 1.5, 1, 0.8, 0.4])
-# ratios = ron_values[1:] / ron_values[:-1]
-
-# decexpo = lambda x, A, lam: A * np.exp(-x / lam)
-# decexpo2 = lambda x, A: A * np.exp(-x / ( -1/np.log(ratios.mean()) ))
-
-# # Fit the decay exponent
-# popt, pcov = curve_fit(decexpo, BV[-6:], ron_values[-6:])
-# popt2, pcov2 = curve_fit(decexpo, BV, ron_values)
-
-# res = ron_values - decexpo(BV, *popt)
-# res2 = ron_values - decexpo(BV, *popt2)
-
-# chi = np.sum(res**2)
-# chi2 = np.sum(res2**2)
-
-# print(chi, chi2)
-
-# plt.figure()
-# plt.plot(BV, ron_values, marker='o')
-# plt.plot(BV, decexpo(BV, *popt), label='Exponential Fit', linestyle='--')
-# plt.plot(BV, decexpo(BV, *popt2), label='Exponential Fit', linestyle=':')
-# plt.xlabel('Bias Voltage [V]')
-# plt.ylabel('Read Noise [e-]')
-# plt.title('Read Noise vs Bias Voltage')
-# plt.grid(True)
 
 #----------------------------------
 # SNR
@@ -497,19 +272,25 @@ N_tel = 4 # Number of telescopes contributing to the beam combination
 rho_0 = 0.8 # Max coupling efficiency, Coupling efficiency of the single-mode fiber
 rho_1 = 0.95 # Relative coupling efficiency for a M2 diameter being 13% of M1 diameter, like for the UT (Ruilier 1998)
 rho0 = rho_0 * rho_1 # Coupling efficiency for the UT, taking into account central obscuration.
-Sr = 0.5 # Strehl ratio
 t_echelle = 0.25 # Throughput of the échelle spectrograph
-t_sharps = 0.34/4 # Average throughput of GRAVITY in HR mode, as a proxy for SHARPS
+t_sharps = 0.20 # Average throughput of GRAVITY in HR mode, as a proxy for SHARPS
+t_corrector = 0.26
+"""
+Corrective througphput so limiting magnitude match GRAVITY's K=22 on UTs 
+for 60 min integration time with 100s exposure time per frame 
+(source: Very Large Telescope Paranal Science Operations GRAVITY User Manual + 
+advertised limiting magnitude by GPAO + DIT of 100s for "deep integration" and exp time of 60 min (assumed)) 
+"""
 n_pix = 16 # Number of pixels to sample a fringe in a spectral chanel: spot of 2x2 pixels and 4 outputs
 
 # Detector parameters
 QE = 0.8 # Quantum efficiency of the detector
 dk_rate = 1e-4 # Dark current rate in e-/px/s
-t_exp = 1. # Exposure time in seconds
-t_int = 10*60. # Integration time in seconds
+t_exp= 30. # Total exposure time in minutes
+t_exp *= 60. # Total exposure time in seconds
 
-for t_exp in [1. ,10., 100.]:
-    nb_frames = t_int // t_exp # Number of frames in the integration time
+for t_dit in [1. ,10., 100.]:
+    nb_frames = t_exp // t_dit # Number of frames in the integration time
     glow = 0.1 # Glow in e-/px/frame, to be reduced in next detector prototype
 
     # Photometric parameters
@@ -519,14 +300,16 @@ for t_exp in [1. ,10., 100.]:
 
     wls = [0.79, 1.0305, 1.235, 1.662, 2.159] # in um
     wls = np.array(wls)
+    Sr = [0.5, 0.5, 0.5, 0.5, 0.8] # Strehl ratio set at 0.5 for Y, I, J and H bands, and 0.8 for K band, as a proxy for the expected performance of the AO system in each band (per GPAO expectations)
+
 
     # R = 25000 # Spectral resolution of the spectrograph
 
     for R in [22, 500, 4500, 25000]:
 
         dls = wls / R # Spectral bin width in um
-        mag_range = np.linspace(0, 20, 11) # Range of target magnitudes to explore
-        visi_range = np.linspace(0., 1.0, 5) # Range of fringe visibilities to explore
+        mag_range = np.linspace(0, 23, 24) # Range of target magnitudes to explore
+        visi_range = np.array([0.1, 0.5, 1.0]) # Range of fringe visibilities to explore
         voltage_range = np.arange(3, 13) # Range of bias voltages to explore
 
         snr_results = np.zeros((len(dls), len(visi_range), len(mag_range), len(voltage_range))) # wl, V, mag, BV
@@ -536,12 +319,13 @@ for t_exp in [1. ,10., 100.]:
                 for j, mag in enumerate(mag_range):
                     for k, BV in enumerate(voltage_range):
                         t_vlti_interp = interp1d(wls[2:], t_vlti, kind='linear', fill_value='extrapolate')
-                        throughput = t_vlti_interp(wls[m]) * rho_0 * t_echelle * t_sharps * Sr # Total throughput
+                        throughput = t_vlti_interp(wls[m]) * rho_0 * t_echelle * t_sharps * Sr[m] * t_corrector # Total throughput
+                        # throughput = t_vlti[-1] * rho_0 * t_echelle * t_sharps * Sr[m] * t_corrector # Total throughput
 
-                        n_ph = photon_number(t_exp, mag=mag, throughput=throughput, S_tel=S_tel, N_tel=N_tel, dl=dl, QE=QE, phi_0=phi[m])
+                        n_ph = photon_number(t_dit, mag=mag, throughput=throughput, S_tel=S_tel, N_tel=N_tel, dl=dl, QE=QE, phi_0=phi[m])
 
                         nrj = coherent_energy(n_ph, visi)
-                        noises = total_noise(n_ph, visi, 2, dk_rate, t_exp, n_pix, BV, glow, nb_frames)
+                        noises = total_noise(n_ph, visi, 2, dk_rate, t_dit, n_pix, BV, glow, nb_frames)
                         snr = calculate_snr(nrj, noises)
                         snr_results[m, i, j, k] = snr
 
@@ -549,24 +333,15 @@ for t_exp in [1. ,10., 100.]:
         # Plotting SNR
         #------------------------------
 
-        froz_values = {'visibility': 1, 'Bias voltage (V)': 12.0}
-        fig, ax = plot_all_1d_cuts(
-            data_cube=snr_results,
-            axis_values=[wl_labels, visi_range, mag_range, voltage_range],
-            represented_axes=['Magnitude', 'Band'],  # x-axis then all line cuts
-            frozen_values=froz_values,
-            axis_names=['Band', 'visibility', 'Magnitude', 'Bias voltage (V)'],
+        for v in visi_range:
+            froz_values = {'visibility': v, 'Bias voltage (Volt)': 12.0}
+            fig, ax = plot_all_1d_cuts(
+                data_cube=snr_results,
+                axis_values=[wl_labels, visi_range, mag_range, voltage_range],
+                represented_axes=['Magnitude', 'Band'],  # x-axis then all line cuts
+                frozen_values=froz_values,
+            axis_names=['Band', 'visibility', 'Magnitude', 'Bias voltage (Volt)'],
             quantity_label=r'SNR ($V^2$)'
-        )
-        fig.savefig(f'snr_vs_mag_visibility{froz_values["visibility"]}_BV{froz_values["Bias voltage (V)"]:04.1f}_R{R}_CDS{cds_mode}_{tel_type}_texp{t_exp}_tin{t_int/60:.1f}.png', dpi=150)
-        plt.close('all')
-        # froz_values = {'visibility': 0.5, 'Bias voltage (V)': 12.0}
-        # fig, ax = plot_all_1d_cuts(
-        #     data_cube=snr_results,
-        #     axis_values=[wl_labels, visi_range, mag_range, voltage_range],
-        #     represented_axes=['Magnitude', 'Band'],  # x-axis then all line cuts
-        #     frozen_values=froz_values,
-        #     axis_names=['Band', 'visibility', 'Magnitude', 'Bias voltage (V)'],
-        #     quantity_label=r'SNR ($V^2$)'
-        # )
-        # fig.savefig(f'snr_vs_mag_visibility{froz_values["visibility"]}_BV{froz_values["Bias voltage (V)"]:04.1f}_R{R}_CDS{cds_mode}_{tel_type}_texp{t_exp}_tin{t_int/60:.1f}.png', dpi=150)
+            )
+            fig.savefig(f'figures/snr_vs_mag_visibility{froz_values["visibility"]}_BV{froz_values["Bias voltage (Volt)"]:04.1f}_R{R}_CDS{cds_mode}_{tel_type}_tdit{t_dit}_texp{t_exp/60:.1f}.png', dpi=150)
+            plt.close('all')
