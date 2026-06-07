@@ -34,3 +34,7 @@ snr_vs_mag_visibility1_BV12.0_R25000_CDSFalse_UT_texp10.0.png
 snr_vs_mag_visibility1_BV12.0_R25000_CDSFalse_UT_texp100.0_tin10.0.png
 snr_vs_mag_visibility1_BV12.0_R25000_CDSFalse_UT_texp100.0.png
 snr_vs_mag_visibility1_BV12.0_R25000_CDSFalse_UT.png
+
+# Keep archived figure set versioned in git
+!figures_commit_f98a50e/
+!figures_commit_f98a50e/**
